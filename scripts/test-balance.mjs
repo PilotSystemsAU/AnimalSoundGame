@@ -97,6 +97,34 @@ async function main() {
       nr.animals.join(",")
     );
 
+    // Admin panel shows the real animal names for the round
+    check(
+      "Admin panel lists this round's animal names",
+      st.animals.map((a) => a.name).sort().join(",") === [...nr.animals].sort().join(","),
+      st.animals.map((a) => a.name).join(",")
+    );
+
+    // 3 groups from a 15-animal pool: only 3 animals used, 100 players split 34/33/33
+    const POOL15 = ["Monkey", "Elephant", "Dog", "Cow", "Cat", "Duck", "Sheep", "Pig", "Lion", "Chicken", "Horse", "Frog", "Owl", "Donkey", "Goat"].map((a) => `Test-${a}`);
+    await call("/api/admin/config", { method: "POST", body: { pool: POOL15, groupCount: 3 } });
+    const r3 = (await call("/api/admin/new-round", { method: "POST" })).data;
+    const seen = new Set();
+    for (let i = 0; i < 100; i++) seen.add((await join()).animal);
+    c = await counts();
+    check(
+      "3 groups from 15: only 3 animals handed out, split 34/33/33",
+      r3.animals.length === 3 && seen.size === 3 && [...seen].every((a) => r3.animals.includes(a)) && c.join(",") === "34,33,33",
+      `round=${r3.animals.join(",")} handed out=${[...seen].join(",")} counts=${c.join(",")}`
+    );
+
+    // 4 groups, 5 players: exactly 4 animals, one shared
+    await call("/api/admin/config", { method: "POST", body: { pool: POOL15, groupCount: 4 } });
+    await call("/api/admin/new-round", { method: "POST" });
+    const five = new Set();
+    for (let i = 0; i < 5; i++) five.add((await join()).animal);
+    c = await counts();
+    check("4 groups, 5 players: 4 animals used, split 2/1/1/1", five.size === 4 && c.join(",") === "2,1,1,1", c.join(","));
+
     // Validation
     const bad = await call("/api/admin/config", { method: "POST", body: { pool: ["Dog", "dog"], groupCount: 2 } });
     check("Duplicate animal names rejected", bad.status === 400);

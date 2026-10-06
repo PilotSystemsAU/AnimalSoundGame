@@ -23,6 +23,21 @@ export class StoreNotConfiguredError extends Error {
   }
 }
 
+export function toHashObject(v: unknown): Record<string, string> {
+  if (v == null) return {};
+  if (Array.isArray(v)) {
+    const out: Record<string, string> = {};
+    for (let i = 0; i + 1 < v.length; i += 2) out[String(v[i])] = String(v[i + 1]);
+    return out;
+  }
+  if (typeof v === "object") {
+    const out: Record<string, string> = {};
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) out[k] = String(val);
+    return out;
+  }
+  return {};
+}
+
 function upstashStore(url: string, token: string): Store {
   const r = new UpstashRedis({ url, token, automaticDeserialization: false });
   return {
@@ -37,8 +52,10 @@ function upstashStore(url: string, token: string): Store {
       return r.incr(key);
     },
     async hgetall(key) {
-      const v = await r.hgetall<Record<string, string>>(key);
-      return v ?? {};
+      // With automaticDeserialization off, Upstash returns the raw Redis reply:
+      // a flat [field, value, field, value, ...] array rather than an object.
+      const v = (await r.hgetall(key)) as unknown;
+      return toHashObject(v);
     },
     async evalScript(script, keys, args) {
       return r.eval(script, keys, args);

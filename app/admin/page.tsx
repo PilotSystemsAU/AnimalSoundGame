@@ -1,18 +1,25 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
 import QRCode from "qrcode";
 
 type Config = { pool: string[]; groupCount: number };
 type Round = { id: string; animals: { name: string; count: number }[]; total: number } | null;
 type State = { config: Config; round: Round };
+type Draft = { pool: string[]; groups: number };
 
 const POLL_MS = 3000;
+
+const sameDraft = (d: Draft, c: Config) => d.groups === c.groupCount && d.pool.join("\n") === c.pool.join("\n");
 
 export default function AdminPage() {
   const [auth, setAuth] = useState<"checking" | "out" | "in">("checking");
   const [state, setState] = useState<State | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
+  const [draft, setDraft] = useState<Draft | null>(null);
+  const draftRef = useRef<Draft | null>(null);
+  draftRef.current = draft;
+  const stateRef = useRef<State | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -29,6 +36,13 @@ export default function AdminPage() {
       }
       setAuth("in");
       setBanner(null);
+      // Pick up settings saved elsewhere, unless there are unsaved edits here.
+      const d = draftRef.current;
+      const prev = stateRef.current;
+      if (!d || !prev || sameDraft(d, prev.config)) {
+        setDraft({ pool: data.config.pool, groups: data.config.groupCount });
+      }
+      stateRef.current = data;
       setState(data);
     } catch {
       setBanner("Can't reach the server. Retrying…");
@@ -43,8 +57,20 @@ export default function AdminPage() {
     return () => clearInterval(t);
   }, [load]);
 
+  async function saveDraft(d: Draft): Promise<string | null> {
+    const res = await fetch("/api/admin/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pool: d.pool, groupCount: d.groups }),
+    });
+    if (res.ok) return null;
+    return (await res.json().catch(() => ({}))).error || "Couldn't save the settings.";
+  }
+
   if (auth === "checking") return <main className="admin"><p className="muted">Loading…</p></main>;
   if (auth === "out") return <Login onDone={load} />;
+
+  const dirty = Boolean(state && draft && !sameDraft(draft, state.config));
 
   return (
     <main className="admin">
@@ -64,11 +90,25 @@ export default function AdminPage() {
         </button>
       </header>
       {banner && <div className="banner">{banner}</div>}
-      {state && (
+      {state && draft && (
         <>
-          <RoundPanel round={state.round} groupCount={state.config.groupCount} onChange={load} onError={setBanner} />
+          <RoundPanel
+            round={state.round}
+            draft={draft}
+            dirty={dirty}
+            saveDraft={saveDraft}
+            onChange={load}
+            onError={setBanner}
+          />
+          <SettingsPanel
+            draft={draft}
+            setDraft={setDraft}
+            dirty={dirty}
+            saveDraft={saveDraft}
+            onSaved={load}
+            roundAnimals={state.round?.animals.length ?? null}
+          />
           <QrPanel />
-          <SettingsPanel config={state.config} onSaved={load} />
         </>
       )}
     </main>
@@ -119,12 +159,16 @@ function Login({ onDone }: { onDone: () => void }) {
 
 function RoundPanel({
   round,
-  groupCount,
+  draft,
+  dirty,
+  saveDraft,
   onChange,
   onError,
 }: {
   round: Round;
-  groupCount: number;
+  draft: Draft;
+  dirty: boolean;
+  saveDraft: (d: Draft) => Promise<string | null>;
   onChange: () => void;
   onError: (msg: string) => void;
 }) {
@@ -132,12 +176,22 @@ function RoundPanel({
   const max = round ? Math.max(1, ...round.animals.map((a) => a.count)) : 1;
   const lonely = round && round.total > 0 ? round.animals.filter((a) => a.count < 2) : [];
 
+  // New round always uses the settings currently on screen (saving them first).
   async function start() {
+    const what = `${draft.groups} groups (${draft.groups} animals picked at random from your pool of ${draft.pool.length})`;
     const msg = round
-      ? "Start a new round? Everyone will need to scan the QR code again."
-      : `Start the first round with ${groupCount} animals?`;
+      ? `Start a new round with ${what}?\n\nEveryone will need to scan the QR code again.`
+      : `Start the first round with ${what}?`;
     if (!confirm(msg)) return;
     setBusy(true);
+    if (dirty) {
+      const err = await saveDraft(draft);
+      if (err) {
+        setBusy(false);
+        onError(err);
+        return;
+      }
+    }
     const res = await fetch("/api/admin/new-round", { method: "POST" });
     setBusy(false);
     if (!res.ok) onError((await res.json().catch(() => ({}))).error || "Couldn't start a new round.");
@@ -151,7 +205,7 @@ function RoundPanel({
           <h2>{round ? `Round ${round.id}` : "No round yet"}</h2>
           <p className="muted">
             {round
-              ? `${round.total} ${round.total === 1 ? "player has" : "players have"} scanned`
+              ? `${round.animals.length} animals in play · ${round.total} ${round.total === 1 ? "player has" : "players have"} scanned`
               : "Start a round, then have everyone scan the QR code."}
           </p>
         </div>
@@ -180,6 +234,113 @@ function RoundPanel({
           — nobody to find. If everyone has scanned, lower the number of groups and start a new round.
         </p>
       )}
+    </section>
+  );
+}
+
+function SettingsPanel({
+  draft,
+  setDraft,
+  dirty,
+  saveDraft,
+  onSaved,
+  roundAnimals,
+}: {
+  draft: Draft;
+  setDraft: (d: Draft) => void;
+  dirty: boolean;
+  saveDraft: (d: Draft) => Promise<string | null>;
+  onSaved: () => void;
+  roundAnimals: number | null;
+}) {
+  const [newName, setNewName] = useState("");
+  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const { pool, groups } = draft;
+
+  function add(e: FormEvent) {
+    e.preventDefault();
+    const name = newName.trim().replace(/\s+/g, " ");
+    if (!name) return;
+    if (pool.some((p) => p.toLowerCase() === name.toLowerCase())) {
+      setMsg({ kind: "error", text: `"${name}" is already in the pool.` });
+      return;
+    }
+    setDraft({ ...draft, pool: [...pool, name] });
+    setNewName("");
+    setMsg(null);
+  }
+
+  async function save() {
+    setBusy(true);
+    setMsg(null);
+    const err = await saveDraft(draft);
+    setBusy(false);
+    if (err) {
+      setMsg({ kind: "error", text: err });
+      return;
+    }
+    setMsg({ kind: "ok", text: "Saved. Used when you start the next round." });
+    onSaved();
+  }
+
+  const differsFromRound = roundAnimals != null && roundAnimals !== groups;
+
+  return (
+    <section className="card">
+      <h2>Settings for the next round</h2>
+      <p className="muted">
+        Tapping <strong>New round</strong> uses these settings, saving any changes first.
+      </p>
+
+      <div className="field">
+        <label htmlFor="groups">Number of groups</label>
+        <div className="stepper">
+          <button className="btn" onClick={() => setDraft({ ...draft, groups: Math.max(2, groups - 1) })} aria-label="Fewer groups">−</button>
+          <input
+            id="groups"
+            type="number"
+            min={2}
+            max={pool.length}
+            value={groups}
+            onChange={(e) => setDraft({ ...draft, groups: Number(e.target.value) })}
+          />
+          <button className="btn" onClick={() => setDraft({ ...draft, groups: Math.min(pool.length, groups + 1) })} aria-label="More groups">+</button>
+        </div>
+        <p className="muted small">
+          Each round picks this many animals at random from the pool, and everyone is split evenly between them.
+          {differsFromRound && ` The current round has ${roundAnimals}; start a new round to switch to ${groups}.`}
+        </p>
+      </div>
+
+      <div className="field">
+        <label>Animal pool ({pool.length})</label>
+        <ul className="chips">
+          {pool.map((name) => (
+            <li key={name}>
+              {name}
+              <button onClick={() => setDraft({ ...draft, pool: pool.filter((p) => p !== name) })} aria-label={`Remove ${name}`}>×</button>
+            </li>
+          ))}
+        </ul>
+        <form className="row" onSubmit={add}>
+          <input
+            placeholder="Add an animal"
+            value={newName}
+            maxLength={30}
+            onChange={(e) => setNewName(e.target.value)}
+          />
+          <button className="btn" disabled={!newName.trim()}>Add</button>
+        </form>
+      </div>
+
+      <div className="row">
+        <button className="btn" onClick={save} disabled={!dirty || busy}>
+          {busy ? "Saving…" : "Save settings"}
+        </button>
+        {dirty && <span className="muted small">Unsaved changes (New round will save them)</span>}
+      </div>
+      {msg && <p className={msg.kind === "ok" ? "ok" : "error"}>{msg.text}</p>}
     </section>
   );
 }
@@ -217,113 +378,6 @@ function QrPanel() {
           <p>Scan to get your animal · tap to close</p>
         </div>
       )}
-    </section>
-  );
-}
-
-function SettingsPanel({ config, onSaved }: { config: Config; onSaved: () => void }) {
-  const [pool, setPool] = useState<string[]>(config.pool);
-  const [groups, setGroups] = useState<number>(config.groupCount);
-  const [newName, setNewName] = useState("");
-  const [msg, setMsg] = useState<{ kind: "ok" | "error"; text: string } | null>(null);
-  const [busy, setBusy] = useState(false);
-  const dirty = useMemo(
-    () => groups !== config.groupCount || pool.join("\n") !== config.pool.join("\n"),
-    [pool, groups, config]
-  );
-  const dirtyRef = useRef(dirty);
-  dirtyRef.current = dirty;
-
-  // Pick up changes made on another device, unless we're mid-edit here.
-  useEffect(() => {
-    if (!dirtyRef.current) {
-      setPool(config.pool);
-      setGroups(config.groupCount);
-    }
-  }, [config]);
-
-  function add(e: FormEvent) {
-    e.preventDefault();
-    const name = newName.trim().replace(/\s+/g, " ");
-    if (!name) return;
-    if (pool.some((p) => p.toLowerCase() === name.toLowerCase())) {
-      setMsg({ kind: "error", text: `"${name}" is already in the pool.` });
-      return;
-    }
-    setPool([...pool, name]);
-    setNewName("");
-    setMsg(null);
-  }
-
-  async function save() {
-    setBusy(true);
-    setMsg(null);
-    const res = await fetch("/api/admin/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ pool, groupCount: groups }),
-    });
-    const data = await res.json().catch(() => ({}));
-    setBusy(false);
-    if (!res.ok) {
-      setMsg({ kind: "error", text: data.error || "Couldn't save." });
-      return;
-    }
-    setMsg({ kind: "ok", text: "Saved. Takes effect when you start the next round." });
-    dirtyRef.current = false;
-    onSaved();
-  }
-
-  return (
-    <section className="card">
-      <h2>Settings</h2>
-      <p className="muted">Changes apply from the next round, never mid-round.</p>
-
-      <div className="field">
-        <label htmlFor="groups">Number of groups</label>
-        <div className="stepper">
-          <button className="btn" onClick={() => setGroups(Math.max(2, groups - 1))} aria-label="Fewer groups">−</button>
-          <input
-            id="groups"
-            type="number"
-            min={2}
-            max={pool.length}
-            value={groups}
-            onChange={(e) => setGroups(Number(e.target.value))}
-          />
-          <button className="btn" onClick={() => setGroups(Math.min(pool.length, groups + 1))} aria-label="More groups">+</button>
-        </div>
-        <p className="muted small">Each round picks this many animals at random from the pool below.</p>
-      </div>
-
-      <div className="field">
-        <label>Animal pool ({pool.length})</label>
-        <ul className="chips">
-          {pool.map((name) => (
-            <li key={name}>
-              {name}
-              <button onClick={() => setPool(pool.filter((p) => p !== name))} aria-label={`Remove ${name}`}>×</button>
-            </li>
-          ))}
-        </ul>
-        <form className="row" onSubmit={add}>
-          <input
-            placeholder="Add an animal"
-            value={newName}
-            maxLength={30}
-            onChange={(e) => setNewName(e.target.value)}
-          />
-          <button className="btn" disabled={!newName.trim()}>Add</button>
-        </form>
-      </div>
-
-      <div className="row">
-        <button className="btn primary" onClick={save} disabled={!dirty || busy}>
-          {busy ? "Saving…" : "Save settings"}
-        </button>
-        {dirty && <span className="muted small">Unsaved changes</span>}
-      </div>
-      {msg && <p className={msg.kind === "ok" ? "ok" : "error"}>{msg.text}</p>}
     </section>
   );
 }

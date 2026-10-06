@@ -1,6 +1,41 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+
+// Largest font size at which the name fits the screen without breaking a word.
+function FitName({ name }: { name: string }) {
+  const ref = useRef<HTMLHeadingElement>(null);
+  const [size, setSize] = useState<number | null>(null);
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const fit = () => {
+      const maxHeight = window.innerHeight * 0.7;
+      let lo = 20;
+      let hi = 220;
+      while (hi - lo > 1) {
+        const mid = Math.floor((lo + hi) / 2);
+        el.style.fontSize = `${mid}px`;
+        const fits = el.scrollWidth <= el.clientWidth && el.scrollHeight <= maxHeight;
+        if (fits) lo = mid;
+        else hi = mid;
+      }
+      el.style.fontSize = `${lo}px`;
+      setSize(lo);
+    };
+    fit();
+    window.addEventListener("resize", fit);
+    document.fonts?.ready.then(fit).catch(() => {});
+    return () => window.removeEventListener("resize", fit);
+  }, [name]);
+
+  return (
+    <h1 ref={ref} className="animal" style={{ visibility: size == null ? "hidden" : "visible" }}>
+      {name}
+    </h1>
+  );
+}
 
 const DEVICE_KEY = "ag_device";
 const POLL_MS = 5000;
@@ -108,9 +143,7 @@ export default function PlayerPage() {
   if (view.kind === "animal") {
     return (
       <main className="player">
-        <h1 className="animal" style={{ ["--len" as string]: view.animal.length }}>
-          {view.animal}
-        </h1>
+        <FitName name={view.animal} />
       </main>
     );
   }

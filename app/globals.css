@@ -61,8 +61,11 @@ body {
   letter-spacing: -0.02em;
   line-height: 1;
   text-transform: uppercase;
-  font-size: clamp(3rem, calc(170vw / (var(--len, 6) + 1)), 10rem);
-  overflow-wrap: anywhere;
+  width: 100%;
+  font-size: 64px; /* replaced by FitName after measuring */
+  overflow-wrap: normal;
+  word-break: keep-all;
+  hyphens: none;
 }
 .status { max-width: 22rem; }
 .status-title { margin: 0 0 12px; font-size: 2rem; font-weight: 800; }
