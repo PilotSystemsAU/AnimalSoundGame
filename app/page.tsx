@@ -11,13 +11,17 @@ function FitName({ name }: { name: string }) {
     const el = ref.current;
     if (!el) return;
     const fit = () => {
+      // Measure against the screen (the page's padded content box), not the heading itself.
+      const parent = el.parentElement!;
+      const cs = getComputedStyle(parent);
+      const maxWidth = parent.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
       const maxHeight = window.innerHeight * 0.7;
       let lo = 20;
       let hi = 220;
       while (hi - lo > 1) {
         const mid = Math.floor((lo + hi) / 2);
         el.style.fontSize = `${mid}px`;
-        const fits = el.scrollWidth <= el.clientWidth && el.scrollHeight <= maxHeight;
+        const fits = el.scrollWidth <= maxWidth && el.scrollHeight <= maxHeight;
         if (fits) lo = mid;
         else hi = mid;
       }

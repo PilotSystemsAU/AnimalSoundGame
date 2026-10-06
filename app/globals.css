@@ -61,7 +61,8 @@ body {
   letter-spacing: -0.02em;
   line-height: 1;
   text-transform: uppercase;
-  width: 100%;
+  width: max-content; /* so scrollWidth is the real text width */
+  max-width: none;
   font-size: 64px; /* replaced by FitName after measuring */
   overflow-wrap: normal;
   word-break: keep-all;
